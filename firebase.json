@@ -1,0 +1,24 @@
+﻿{
+    "flutter":  {
+                    "platforms":  {
+                                      "android":  {
+                                                      "default":  {
+                                                                      "projectId":  "safefamily-app-aa07b",
+                                                                      "appId":  "1:89374348217:android:e17eea13d38537b625dc68",
+                                                                      "fileOutput":  "android/app/google-services.json"
+                                                                  }
+                                                  },
+                                      "dart":  {
+                                                   "lib/firebase_options.dart":  {
+                                                                                     "projectId":  "safefamily-app-aa07b",
+                                                                                     "configurations":  {
+                                                                                                            "android":  "1:89374348217:android:e17eea13d38537b625dc68"
+                                                                                                        }
+                                                                                 }
+                                               }
+                                  }
+                },
+    "firestore":  {
+                      "rules":  "firestore.rules"
+                  }
+}

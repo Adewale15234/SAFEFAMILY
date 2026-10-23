@@ -46,3 +46,43 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Local Android SDK settings and private API keys
+/android/local.properties
+/android/local.properties.bak-*
+
+# SAFEFAMILY: generated build output and local caches
+/android/build/
+/android/.gradle/
+/android/.kotlin/
+/firestore-tests/node_modules/
+/.dart_tool/
+/build/
+/.flutter-plugins-dependencies/
+
+# SAFEFAMILY: temporary backups and debugging logs
+*.bak-*
+*.backup-*
+*.before-*
+*_before_*.dart
+/backups/
+/backup-firestore-client-*/
+/backup-profile-storage-*/
+/safefamily-standard-backup-*/
+/SAFEFAMILY-crash-log.txt
+/main_before_chat_destination_fix.txt
+
+# SAFEFAMILY: local environment and credential files
+.env
+.env.*
+/firestore-tests/.env
+/firestore-tests/.env.*
+
+# SAFEFAMILY: historical Firestore test backups
+/firestore-tests/*.backup-*
+/firestore-tests/*.before-*
+
+# SAFEFAMILY: local Firebase emulator logs
+/firebase-debug.log
+/firestore-debug.log
+/ui-debug.log

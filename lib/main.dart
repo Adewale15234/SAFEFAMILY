@@ -1,16 +1,44 @@
-﻿
-import 'package:flutter/material.dart';
-import 'chat_page.dart';
+import 'dart:convert';
 
-void main() {
+import 'package:flutter/material.dart';
+
+import 'location_map_page.dart';
+
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'auth_gate.dart';
+import 'chat_page.dart';
+import 'firebase_options.dart';
+import 'family_members.dart';
+import 'cloud_family_members.dart';
+import 'family_repository.dart';
+import 'family_invitations_page.dart';
+import 'emergency_service.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
   runApp(const SafeFamilyApp());
 }
+
+// -----------------------------------------------------------------------------
+// APP THEME
+// -----------------------------------------------------------------------------
 
 const emerald = Color(0xFF16D9A0);
 const background = Color(0xFF0B1110);
 const surface = Color(0xFF151F1C);
 const muted = Color(0xFF9AAEA5);
 const danger = Color(0xFFFF6675);
+const cardBorder = Color(0xFF293831);
+
+// -----------------------------------------------------------------------------
+// FAMILY PROFILE MODEL
+// -----------------------------------------------------------------------------
 
 class FamilyProfile {
   final String familyName;
@@ -24,7 +52,29 @@ class FamilyProfile {
     required this.phone,
     required this.city,
   });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'familyName': familyName,
+      'guardianName': guardianName,
+      'phone': phone,
+      'city': city,
+    };
+  }
+
+  factory FamilyProfile.fromJson(Map<String, dynamic> json) {
+    return FamilyProfile(
+      familyName: json['familyName'] as String? ?? '',
+      guardianName: json['guardianName'] as String? ?? '',
+      phone: json['phone'] as String? ?? '',
+      city: json['city'] as String? ?? '',
+    );
+  }
 }
+
+// -----------------------------------------------------------------------------
+// APP
+// -----------------------------------------------------------------------------
 
 class SafeFamilyApp extends StatelessWidget {
   const SafeFamilyApp({super.key});
@@ -43,11 +93,23 @@ class SafeFamilyApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
         fontFamily: 'Roboto',
+        snackBarTheme: const SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: background,
+          foregroundColor: Colors.white,
+          centerTitle: false,
+        ),
       ),
-      home: const SafetyDashboard(),
+      home: AuthGate(authenticatedBuilder: (_) => const SafetyDashboard()),
     );
   }
 }
+
+// -----------------------------------------------------------------------------
+// MAIN DASHBOARD
+// -----------------------------------------------------------------------------
 
 class SafetyDashboard extends StatefulWidget {
   const SafetyDashboard({super.key});
@@ -57,18 +119,121 @@ class SafetyDashboard extends StatefulWidget {
 }
 
 class _SafetyDashboardState extends State<SafetyDashboard> {
+  static const String _legacyFamilyStorageKey = 'safefamily_family_profile_v1';
+
+  String get _familyStorageKey {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    return 'safefamily_family_profile_v2_${uid ?? 'local'}';
+  }
+
   int selectedTab = 0;
   FamilyProfile? family;
+  String? cloudFamilyId;
+  bool isLoadingFamily = true;
+  bool isSavingFamily = false;
+  bool isSendingSos = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFamilyProfile();
+  }
+
+  Future<void> _loadFamilyProfile() async {
+    FamilyProfile? localProfile;
+
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      var savedProfile = preferences.getString(_familyStorageKey);
+
+      // Preserve the legacy profile unless the account-specific copy succeeds.
+      if (savedProfile == null && FirebaseAuth.instance.currentUser != null) {
+        final legacyProfile = preferences.getString(_legacyFamilyStorageKey);
+
+        if (legacyProfile != null) {
+          final copied = await preferences.setString(
+            _familyStorageKey,
+            legacyProfile,
+          );
+
+          if (copied) {
+            savedProfile = legacyProfile;
+            await preferences.remove(_legacyFamilyStorageKey);
+          }
+        }
+      }
+
+      if (savedProfile != null) {
+        final decoded = jsonDecode(savedProfile);
+
+        if (decoded is Map<String, dynamic>) {
+          localProfile = FamilyProfile.fromJson(decoded);
+        } else if (decoded is Map) {
+          localProfile = FamilyProfile.fromJson(
+            Map<String, dynamic>.from(decoded),
+          );
+        }
+      }
+    } catch (error) {
+      debugPrint('Could not load local family profile: $error');
+    }
+
+    FamilyProfile? loadedProfile = localProfile;
+    final currentUser = FirebaseAuth.instance.currentUser;
+
+    // A cloud profile takes precedence only when this account has a valid
+    // active family membership. Local data remains untouched as a fallback.
+    if (currentUser != null) {
+      try {
+        final cloudData = await FamilyRepository().getMyFamily();
+
+        if (cloudData != null) {
+          final id = cloudData['familyId'];
+          if (id is String && id.isNotEmpty) {
+            cloudFamilyId = id;
+            loadedProfile = FamilyProfile(
+              familyName: cloudData['familyName'] as String? ?? '',
+              guardianName: cloudData['guardianName'] as String? ?? '',
+              phone: cloudData['phone'] as String? ?? '',
+              city: cloudData['city'] as String? ?? '',
+            );
+          }
+        }
+      } catch (error) {
+        // For example, live Firestore rules may not yet be deployed.
+        // Keep the locally saved profile available.
+        debugPrint('Could not load cloud family profile: $error');
+      }
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      family = loadedProfile;
+      isLoadingFamily = false;
+    });
+  }
+
+  Future<bool> _persistFamilyProfile(FamilyProfile profile) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+
+      return await preferences.setString(
+        _familyStorageKey,
+        jsonEncode(profile.toJson()),
+      );
+    } catch (error) {
+      debugPrint('Could not save family profile locally: $error');
+      return false;
+    }
+  }
 
   void showMessage(String message) {
+    if (!mounted) return;
+
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(message),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> openFamilySetup() async {
@@ -79,28 +244,200 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
       ),
     );
 
-    if (result != null && mounted) {
+    if (result == null || !mounted) return;
+
+    setState(() {
+      isSavingFamily = true;
+    });
+
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+
+      if (cloudFamilyId != null) {
+        // Existing cloud family: update cloud first, then refresh local cache.
+        await FamilyRepository().updateFamily(
+          familyId: cloudFamilyId!,
+          familyName: result.familyName,
+          guardianName: result.guardianName,
+          phone: result.phone,
+          city: result.city,
+        );
+
+        if (!mounted) return;
+
+        setState(() {
+          family = result;
+          selectedTab = 0;
+        });
+
+        final locallySaved = await _persistFamilyProfile(result);
+
+        if (!mounted) return;
+        showMessage(
+          locallySaved ? 'Family profile synced with the cloud.' : 'Cloud profile updated, but the local backup could not be saved.',
+        );
+        return;
+      }
+
+      // Without cloud membership, signed-in users choose explicitly.
+      var saveToCloud = false;
+
+      if (currentUser != null) {
+        final choice = await showDialog<String>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Where should we save your family?'),
+            content: const Text(
+              'Your existing local data will be preserved. You can save '
+              'this profile on this device or create a cloud family so '
+              'membership and invitations can be connected later.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, 'cancel'),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, 'local'),
+                child: const Text('This device only'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, 'cloud'),
+                child: const Text('Create cloud family'),
+              ),
+            ],
+          ),
+        );
+
+        if (choice == null || choice == 'cancel') return;
+        saveToCloud = choice == 'cloud';
+      }
+
+      if (saveToCloud) {
+        // Repository creates family, owner membership and account index
+        // atomically. It rejects accounts that already have an index.
+        final createdId = await FamilyRepository().createFamily(
+          familyName: result.familyName,
+          guardianName: result.guardianName,
+          phone: result.phone,
+          city: result.city,
+        );
+
+        cloudFamilyId = createdId;
+      }
+
+      final locallySaved = await _persistFamilyProfile(result);
+
+      if (!mounted) return;
+
       setState(() {
         family = result;
         selectedTab = 0;
       });
 
-      showMessage('Family profile created on this device.');
+      if (saveToCloud) {
+        showMessage(
+          locallySaved ? 'Cloud family created successfully.' : 'Cloud family created, but the local backup could not be saved.',
+        );
+      } else {
+        showMessage(
+          locallySaved
+              ? 'Family profile saved on this device only.'
+              : 'The profile could not be saved locally.',
+        );
+      }
+    } catch (error) {
+      debugPrint('Could not save family profile: $error');
+      if (mounted) {
+        showMessage(
+          'Family profile was not synced. Check your connection and '
+          'Firebase permissions, then try again.',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          isSavingFamily = false;
+        });
+      }
+    }
+  }
+
+  void openFamilyTab() {
+    setState(() => selectedTab = 1);
+  }
+
+  void openProfileTab() {
+    setState(() => selectedTab = 4);
+  }
+
+  Future<void> _signOut() async {
+    final shouldSignOut = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sign out?'),
+        content: const Text(
+          'You will return to the sign-in screen. Your family profile '
+          'saved on this device will not be deleted.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sign Out'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldSignOut != true || !mounted) return;
+
+    try {
+      await FirebaseAuth.instance.signOut();
+    } catch (error) {
+      if (mounted) {
+        showMessage('Could not sign out. Please try again.');
+        debugPrint('Sign-out error: $error');
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    if (isLoadingFamily) {
+      return const Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: emerald),
+                SizedBox(height: 16),
+                Text(
+                  'Preparing your family space...',
+                  style: TextStyle(color: muted),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       body: SafeArea(
         child: IndexedStack(
           index: selectedTab,
           children: [
-  		buildHome(),
-  		buildFamilyPage(),
-  		const FamilyChatPage(),
-  		buildSafetyPage(),
-  		buildProfilePage(),
+            buildHome(),
+            buildFamilyPage(),
+            const FamilyChatPage(),
+            buildSafetyPage(),
+            buildProfilePage(),
           ],
         ),
       ),
@@ -141,6 +478,10 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
       ),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // HOME
+  // ---------------------------------------------------------------------------
 
   Widget buildHome() {
     return SingleChildScrollView(
@@ -189,9 +530,9 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
                 ),
               ),
               IconButton(
-                onPressed: () => showMessage(
-                  'Real notifications have not been connected yet.',
-                ),
+                tooltip: 'Notifications',
+                onPressed: () =>
+                    showMessage('Notifications are not connected yet.'),
                 icon: const Icon(Icons.notifications_none_rounded),
                 style: IconButton.styleFrom(
                   backgroundColor: surface,
@@ -210,8 +551,7 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
             ),
           ),
           Text(
-            family?.guardianName.split(' ').first ??
-                'your peace of mind.',
+            family?.guardianName.split(' ').first ?? 'your peace of mind.',
             style: const TextStyle(
               fontSize: 29,
               height: 1.2,
@@ -222,98 +562,10 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
           const SizedBox(height: 10),
           const Text(
             'Stay prepared. Stay connected. Look out for one another.',
-            style: TextStyle(
-              color: muted,
-              fontSize: 14,
-              height: 1.5,
-            ),
+            style: TextStyle(color: muted, fontSize: 14, height: 1.5),
           ),
           const SizedBox(height: 25),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF183E32), Color(0xFF14251F)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(25),
-              border: Border.all(
-                color: emerald.withValues(alpha: 0.22),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Row(
-                  children: [
-                    Icon(
-                      Icons.verified_user_rounded,
-                      color: emerald,
-                      size: 22,
-                    ),
-                    SizedBox(width: 9),
-                    Expanded(
-                      child: Text(
-                        'SAFETY OVERVIEW',
-                        style: TextStyle(
-                          letterSpacing: 1.1,
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    StatusPill(label: 'SETUP'),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  family == null
-                      ? 'Build your family safety circle'
-                      : family!.familyName,
-                  style: const TextStyle(
-                    fontSize: 19,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                Text(
-                  family == null
-                      ? 'Create your family profile to begin setting up your safety circle.'
-                      : 'Your family profile is ready. Member invitations and live safety services are the next steps.',
-                  style: const TextStyle(
-                    color: Color(0xFFB9CDC3),
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                SizedBox(
-                  width: double.infinity,
-                  height: 49,
-                  child: FilledButton(
-                    onPressed: openFamilySetup,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: emerald,
-                      foregroundColor: background,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                    child: Text(
-                      family == null
-                          ? 'Set up my family'
-                          : 'Edit family details',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _buildSafetyOverviewCard(),
           const SizedBox(height: 28),
           Row(
             children: [
@@ -328,7 +580,7 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
                 ),
               ),
               TextButton.icon(
-                onPressed: () => setState(() => selectedTab = 1),
+                onPressed: openFamilyTab,
                 icon: const Icon(Icons.arrow_forward_rounded, size: 17),
                 label: const Text('View family'),
               ),
@@ -336,9 +588,9 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
           ),
           const SizedBox(height: 10),
           if (family == null)
-            emptyFamilyCard()
+            emptyFamilyCard(onTap: openFamilySetup)
           else
-            familySummaryCard(),
+            familySummaryCard(onTap: openFamilyTab),
           const SizedBox(height: 28),
           const Text(
             'EMERGENCY ASSISTANCE',
@@ -349,92 +601,95 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
             ),
           ),
           const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xFF28191B),
-              borderRadius: BorderRadius.circular(23),
-              border: Border.all(
-                color: danger.withValues(alpha: 0.25),
-              ),
-            ),
-            child: Column(
-              children: [
-                const Icon(
-                  Icons.sos_rounded,
-                  size: 42,
-                  color: Color(0xFFFF7883),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Need help?',
-                  style: TextStyle(
-                    fontSize: 21,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                const Text(
-                  'SOS messaging is not connected yet. This preview does not contact emergency services or send SMS.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Color(0xFFD7BFC1),
-                    fontSize: 12,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 17),
-                SizedBox(
-                  width: double.infinity,
-                  height: 52,
-                  child: FilledButton.icon(
-                    onPressed: () {
-                      showDialog<void>(
-                        context: context,
-                        builder: (dialogContext) => AlertDialog(
-                          title: const Text('SOS preview'),
-                          content: const Text(
-                            'No emergency alert or SMS has been sent. Emergency messaging must be implemented and tested before use.',
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () =>
-                                  Navigator.pop(dialogContext),
-                              child: const Text('Understood'),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.warning_amber_rounded),
-                    label: const Text(
-                      'Emergency SOS',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: danger,
-                      foregroundColor: const Color(0xFF241013),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _buildSosCard(),
           const SizedBox(height: 22),
           const Center(
             child: Text(
-              'SAFETY â€¢ TRUST â€¢ FAMILY',
-              style: TextStyle(
-                color: muted,
-                fontSize: 10,
-                letterSpacing: 2,
+              'SAFETY - TRUST - FAMILY',
+              style: TextStyle(color: muted, fontSize: 10, letterSpacing: 2),
+            ),
+          ),
+          if (isSavingFamily) ...[
+            const SizedBox(height: 12),
+            const Center(
+              child: Text(
+                'Saving your profile...',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSafetyOverviewCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF183E32), Color(0xFF14251F)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(25),
+        border: Border.all(color: emerald.withValues(alpha: 0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.verified_user_rounded, color: emerald, size: 22),
+              SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  'SAFETY OVERVIEW',
+                  style: TextStyle(
+                    letterSpacing: 1.1,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              StatusPill(label: 'PROTOTYPE'),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Text(
+            family == null
+                ? 'Build your family safety circle'
+                : family!.familyName,
+            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            family == null
+                ? 'Create your family profile to begin setting up your safety circle.'
+                : 'Your family profile is connected. Invitations are available; live location sharing is not enabled yet.',
+            style: const TextStyle(
+              color: Color(0xFFB9CDC3),
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            height: 49,
+            child: FilledButton(
+              onPressed: openFamilySetup,
+              style: FilledButton.styleFrom(
+                backgroundColor: emerald,
+                foregroundColor: background,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              child: Text(
+                family == null ? 'Set up my family' : 'Edit family details',
+                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
           ),
@@ -443,92 +698,247 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
     );
   }
 
-  Widget emptyFamilyCard() {
+  Widget _buildSosCard() {
     return Container(
-      padding: const EdgeInsets.all(18),
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.06),
-        ),
+        color: const Color(0xFF28191B),
+        borderRadius: BorderRadius.circular(23),
+        border: Border.all(color: danger.withValues(alpha: 0.25)),
       ),
-      child: const Row(
+      child: Column(
         children: [
-          CircleAvatar(
-            radius: 24,
-            backgroundColor: Color(0xFF254238),
-            child: Icon(Icons.people_alt_rounded, color: emerald),
+          const Icon(Icons.sos_rounded, size: 42, color: Color(0xFFFF7883)),
+          const SizedBox(height: 8),
+          const Text(
+            'Need help?',
+            style: TextStyle(fontSize: 21, fontWeight: FontWeight.bold),
           ),
-          SizedBox(width: 13),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'No family profile yet',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                SizedBox(height: 5),
-                Text(
-                  'Set up your family to get started.',
-                  style: TextStyle(color: muted, fontSize: 12),
-                ),
-              ],
+          const SizedBox(height: 7),
+          const Text(
+            'Records an SOS securely for your active family. Other phones are not notified yet.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Color(0xFFD7BFC1),
+              fontSize: 12,
+              height: 1.5,
             ),
           ),
-          Icon(Icons.chevron_right_rounded, color: muted),
+          const SizedBox(height: 17),
+          SizedBox(
+            width: double.infinity,
+            height: 52,
+            child: FilledButton.icon(
+              onPressed: isSendingSos ? null : _showSosConfirmation,
+              icon: const Icon(Icons.warning_amber_rounded),
+              label: Text(
+                isSendingSos ? 'Recording SOS...' : 'Emergency SOS',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: danger,
+                foregroundColor: const Color(0xFF241013),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Widget familySummaryCard() {
-    final currentFamily = family!;
+  Future<void> _showSosConfirmation() async {
+    if (isSendingSos) return;
 
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: emerald.withValues(alpha: 0.18),
+    final user = FirebaseAuth.instance.currentUser;
+    final familyId = cloudFamilyId;
+
+    if (user == null) {
+      showMessage('Please sign in before sending an SOS.');
+      return;
+    }
+
+    if (familyId == null || familyId.isEmpty) {
+      showMessage('Create or join a family before sending an SOS.');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.warning_amber_rounded, color: danger, size: 36),
+        title: const Text('Record an emergency SOS?'),
+        content: const Text(
+          'This saves an emergency record for your active family. '
+          'Other phones are not notified yet. This does not contact '
+          'emergency services or send an SMS.',
         ),
-      ),
-      child: Row(
-        children: [
-          const CircleAvatar(
-            radius: 24,
-            backgroundColor: Color(0xFF254238),
-            child: Icon(Icons.home_work_rounded, color: emerald),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
           ),
-          const SizedBox(width: 13),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  currentFamily.familyName,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  'Guardian: ${currentFamily.guardianName}',
-                  style: const TextStyle(color: muted, fontSize: 12),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  currentFamily.city,
-                  style: const TextStyle(color: muted, fontSize: 12),
-                ),
-              ],
-            ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: danger),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Confirm SOS'),
           ),
-          const Icon(Icons.check_circle_rounded, color: emerald),
         ],
       ),
     );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => isSendingSos = true);
+
+    try {
+      final emailName = user.email?.split('@').first;
+      final displayName = user.displayName?.trim().isNotEmpty == true
+          ? user.displayName!.trim()
+          : (emailName == null || emailName.isEmpty
+                ? 'Family member'
+                : emailName);
+
+      await EmergencyService().createSosAlert(
+        familyId: familyId,
+        senderName: displayName,
+      );
+
+      if (mounted) {
+        showMessage(
+          'SOS recorded securely. Other phones are not notified yet.',
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('Could not record SOS: $error\n$stackTrace');
+
+      if (mounted) {
+        showMessage(
+          'SOS could not be recorded. Check your connection and family membership.',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => isSendingSos = false);
+      }
+    }
   }
+  // ---------------------------------------------------------------------------
+  // FAMILY CARDS
+  // ---------------------------------------------------------------------------
+
+  Widget emptyFamilyCard({VoidCallback? onTap}) {
+    return Material(
+      color: surface,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+          child: const Row(
+            children: [
+              CircleAvatar(
+                radius: 24,
+                backgroundColor: Color(0xFF254238),
+                child: Icon(Icons.people_alt_rounded, color: emerald),
+              ),
+              SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'No family profile yet',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    SizedBox(height: 5),
+                    Text(
+                      'Tap here to set up your family.',
+                      style: TextStyle(color: muted, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded, color: muted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget familySummaryCard({VoidCallback? onTap}) {
+    final currentFamily = family;
+
+    if (currentFamily == null) {
+      return emptyFamilyCard(onTap: onTap);
+    }
+
+    return Material(
+      color: surface,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: emerald.withValues(alpha: 0.18)),
+          ),
+          child: Row(
+            children: [
+              const CircleAvatar(
+                radius: 24,
+                backgroundColor: Color(0xFF254238),
+                child: Icon(Icons.home_work_rounded, color: emerald),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      currentFamily.familyName,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      'Guardian: ${currentFamily.guardianName}',
+                      style: const TextStyle(color: muted, fontSize: 12),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      currentFamily.city,
+                      style: const TextStyle(color: muted, fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Tap to view family details',
+                      style: TextStyle(color: emerald, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: emerald),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // FAMILY TAB
+  // ---------------------------------------------------------------------------
 
   Widget buildFamilyPage() {
     return SingleChildScrollView(
@@ -543,12 +953,31 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
           ),
           const SizedBox(height: 8),
           const Text(
-            'Manage your family profile and prepare to invite trusted members.',
+            'Manage your family profile and family members.',
             style: TextStyle(color: muted, height: 1.5),
           ),
           const SizedBox(height: 25),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                final joined = await Navigator.of(context).push<bool>(
+                  MaterialPageRoute(
+                    builder: (_) => const FamilyInvitationsPage(),
+                  ),
+                );
+                if (joined == true) {
+                  await _loadFamilyProfile();
+                }
+              },
+              icon: const Icon(Icons.mail_outline_rounded),
+              label: const Text('Invitations / Join family'),
+            ),
+          ),
+          const SizedBox(height: 18),
           if (family == null) ...[
-            emptyFamilyCard(),
+            emptyFamilyCard(onTap: openFamilySetup),
             const SizedBox(height: 18),
             SizedBox(
               width: double.infinity,
@@ -564,7 +993,7 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
               ),
             ),
           ] else ...[
-            familySummaryCard(),
+            familySummaryCard(onTap: openFamilySetup),
             const SizedBox(height: 20),
             SizedBox(
               width: double.infinity,
@@ -576,70 +1005,42 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
               ),
             ),
             const SizedBox(height: 25),
-            const Text(
-              'FAMILY MEMBERS',
-              style: TextStyle(
-                letterSpacing: 1.2,
-                fontWeight: FontWeight.bold,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                color: surface,
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: const Column(
-                children: [
-                  Icon(
-                    Icons.person_add_alt_1_rounded,
-                    size: 35,
-                    color: emerald,
-                  ),
-                  SizedBox(height: 12),
-                  Text(
-                    'No members invited yet',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(height: 6),
-                  Text(
-                    'Member invitations are the next development step. No invitation has been sent.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: muted, height: 1.5),
-                  ),
-                ],
-              ),
-            ),
+            if (cloudFamilyId != null) ...[
+              CloudFamilyMembersSection(familyId: cloudFamilyId!),
+              const SizedBox(height: 22),
+            ],
+            const FamilyMembersSection(),
           ],
           const SizedBox(height: 22),
-          const InfoNote(
-            text:
-                'This profile is currently stored in app memory only. It will not survive closing the app or restarting the phone yet.',
+          InfoNote(
+            text: cloudFamilyId != null
+                ? 'Your family profile is connected to the cloud. '
+                      'Connected family accounts are shown above. Live location sharing is not enabled yet.'
+                : 'Your existing profile remains on this device until you '
+                      'choose to create a cloud family. Family-member syncing '
+                      'and invitations are not connected yet.',
           ),
         ],
       ),
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // SAFETY TAB
+  // ---------------------------------------------------------------------------
+
   Widget buildSafetyPage() {
-    return const FeaturePlaceholder(
-      icon: Icons.shield_rounded,
-      title: 'Safety centre',
-      description:
-          'This is where location sharing, safe zones, check-ins and safety alerts will be managed.',
-      items: [
-        'GPS location and last-known position',
-        'Safe-zone entry and exit alerts',
-        'Missed check-ins',
-        'Emergency contacts and SOS delivery',
-      ],
-    );
+    return const LocationMapPage();
   }
 
+  // ---------------------------------------------------------------------------
+  // PROFILE TAB
+  // ---------------------------------------------------------------------------
+
   Widget buildProfilePage() {
+    final currentFamily = family;
+    final currentUser = FirebaseAuth.instance.currentUser;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(22),
       child: Column(
@@ -650,33 +1051,111 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
             'Your profile',
             style: TextStyle(fontSize: 29, fontWeight: FontWeight.bold),
           ),
+          const SizedBox(height: 8),
+          const Text(
+            'Review the guardian and family details saved on this device.',
+            style: TextStyle(color: muted, height: 1.5),
+          ),
           const SizedBox(height: 20),
-          if (family == null)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: surface,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: cardBorder),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.verified_user_rounded, color: emerald),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'ACCOUNT',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                    ),
+                    StatusPill(label: 'SIGNED IN'),
+                  ],
+                ),
+                const SizedBox(height: 15),
+                Text(
+                  currentUser?.displayName?.trim().isNotEmpty == true
+                      ? currentUser!.displayName!
+                      : 'SAFEFAMILY user',
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  currentUser?.email ?? 'No email address available',
+                  style: const TextStyle(color: muted, fontSize: 13),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _signOut,
+                    icon: const Icon(Icons.logout_rounded),
+                    label: const Text('Sign Out'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: danger,
+                      side: BorderSide(color: danger.withValues(alpha: 0.6)),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          if (currentFamily == null) ...[
             const InfoNote(
-              text: 'Create a family profile to see the guardian details here.',
-            )
-          else ...[
+              text:
+                  'Create a family profile to see your guardian details here.',
+            ),
+            const SizedBox(height: 15),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: openFamilySetup,
+                icon: const Icon(Icons.person_add_alt_1_rounded),
+                label: const Text('Create family profile'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: emerald,
+                  foregroundColor: background,
+                ),
+              ),
+            ),
+          ] else ...[
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
                 color: surface,
                 borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: cardBorder),
               ),
               child: Column(
                 children: [
                   const CircleAvatar(
                     radius: 34,
                     backgroundColor: Color(0xFF254238),
-                    child: Icon(
-                      Icons.person_rounded,
-                      color: emerald,
-                      size: 35,
-                    ),
+                    child: Icon(Icons.person_rounded, color: emerald, size: 35),
                   ),
                   const SizedBox(height: 13),
                   Text(
-                    family!.guardianName,
+                    currentFamily.guardianName,
+                    textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.bold,
@@ -684,21 +1163,18 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
                   ),
                   const SizedBox(height: 5),
                   const Text(
-                    'Guardian profile Â· Local preview',
+                    'Guardian profile - Stored locally',
                     style: TextStyle(color: muted, fontSize: 12),
                   ),
                   const Divider(height: 30),
                   ProfileDetail(
                     label: 'Family',
-                    value: family!.familyName,
+                    value: currentFamily.familyName,
                   ),
-                  ProfileDetail(
-                    label: 'Phone',
-                    value: family!.phone,
-                  ),
+                  ProfileDetail(label: 'Phone', value: currentFamily.phone),
                   ProfileDetail(
                     label: 'City / area',
-                    value: family!.city,
+                    value: currentFamily.city,
                   ),
                   const SizedBox(height: 12),
                   SizedBox(
@@ -715,14 +1191,17 @@ class _SafetyDashboardState extends State<SafetyDashboard> {
           ],
           const SizedBox(height: 20),
           const InfoNote(
-            text:
-                'Account login, password recovery, privacy controls and secure cloud synchronisation have not been implemented yet.',
+            text: 'Your account uses Firebase Authentication. Your family profile is still stored locally on this device and is not yet synchronised with other family members.',
           ),
         ],
       ),
     );
   }
 }
+
+// -----------------------------------------------------------------------------
+// FAMILY SETUP FORM
+// -----------------------------------------------------------------------------
 
 class FamilySetupPage extends StatefulWidget {
   final FamilyProfile? existingFamily;
@@ -735,6 +1214,7 @@ class FamilySetupPage extends StatefulWidget {
 
 class _FamilySetupPageState extends State<FamilySetupPage> {
   final formKey = GlobalKey<FormState>();
+
   late final TextEditingController familyNameController;
   late final TextEditingController guardianNameController;
   late final TextEditingController phoneController;
@@ -768,12 +1248,16 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
   }
 
   String? validateRequired(String? value) {
-    if (value == null || value.trim().isEmpty) {
+    final text = value?.trim() ?? '';
+
+    if (text.isEmpty) {
       return 'This field is required.';
     }
-    if (value.trim().length < 2) {
+
+    if (text.length < 2) {
       return 'Please enter at least 2 characters.';
     }
+
     return null;
   }
 
@@ -784,17 +1268,26 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
       return 'Enter a contact phone number.';
     }
 
-    final digits = phone.replaceAll(RegExp(r'[\s()+-]'), '');
+    // Allow digits, spaces, plus signs, parentheses and hyphens.
+    if (!RegExp(r'^[0-9+\s()\-]+$').hasMatch(phone)) {
+      return 'Use only digits and normal phone-number separators.';
+    }
 
-    if (!RegExp(r'^\d{10,15}$').hasMatch(digits)) {
-      return 'Enter a valid phone number with 10â€“15 digits.';
+    final digits = phone.replaceAll(RegExp(r'\D'), '');
+
+    if (digits.length < 10 || digits.length > 15) {
+      return 'Enter a phone number containing 10 to 15 digits.';
     }
 
     return null;
   }
 
   void saveFamily() {
-    if (!formKey.currentState!.validate()) return;
+    FocusScope.of(context).unfocus();
+
+    if (!(formKey.currentState?.validate() ?? false)) {
+      return;
+    }
 
     final result = FamilyProfile(
       familyName: familyNameController.text.trim(),
@@ -823,9 +1316,7 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
       ),
       enabledBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(15),
-        borderSide: BorderSide(
-          color: Colors.white.withValues(alpha: 0.08),
-        ),
+        borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(15),
@@ -837,14 +1328,11 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
 
   @override
   Widget build(BuildContext context) {
+    final isEditing = widget.existingFamily != null;
+
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          widget.existingFamily == null
-              ? 'Create your family'
-              : 'Edit family details',
-        ),
-        backgroundColor: background,
+        title: Text(isEditing ? 'Edit family details' : 'Create your family'),
       ),
       body: SafeArea(
         child: Form(
@@ -866,9 +1354,9 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
                 ),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Start with your family',
-                style: TextStyle(
+              Text(
+                isEditing ? 'Update your family' : 'Start with your family',
+                style: const TextStyle(
                   fontSize: 27,
                   fontWeight: FontWeight.bold,
                 ),
@@ -882,6 +1370,8 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
               TextFormField(
                 controller: familyNameController,
                 textCapitalization: TextCapitalization.words,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.organizationName],
                 decoration: fieldDecoration(
                   label: 'Family name',
                   icon: Icons.home_work_outlined,
@@ -893,6 +1383,8 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
               TextFormField(
                 controller: guardianNameController,
                 textCapitalization: TextCapitalization.words,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.name],
                 decoration: fieldDecoration(
                   label: 'Guardian full name',
                   icon: Icons.person_outline_rounded,
@@ -904,6 +1396,8 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
               TextFormField(
                 controller: phoneController,
                 keyboardType: TextInputType.phone,
+                textInputAction: TextInputAction.next,
+                autofillHints: const [AutofillHints.telephoneNumber],
                 decoration: fieldDecoration(
                   label: 'Contact phone number',
                   icon: Icons.phone_outlined,
@@ -915,17 +1409,18 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
               TextFormField(
                 controller: cityController,
                 textCapitalization: TextCapitalization.words,
+                textInputAction: TextInputAction.done,
                 decoration: fieldDecoration(
                   label: 'City or area',
                   icon: Icons.location_on_outlined,
                   hint: 'e.g. Kaduna North',
                 ),
                 validator: validateRequired,
+                onFieldSubmitted: (_) => saveFamily(),
               ),
               const SizedBox(height: 22),
               const InfoNote(
-                text:
-                    'Prototype notice: these details are held in memory while the app is running. This screen does not create an online account or invite family members.',
+                text: 'Your profile will be saved on this device. This form does not create an online account or invite family members.',
               ),
               const SizedBox(height: 22),
               SizedBox(
@@ -934,9 +1429,7 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
                   onPressed: saveFamily,
                   icon: const Icon(Icons.check_circle_outline_rounded),
                   label: Text(
-                    widget.existingFamily == null
-                        ? 'Create family profile'
-                        : 'Save changes',
+                    isEditing ? 'Save changes' : 'Create family profile',
                     style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.bold,
@@ -958,6 +1451,10 @@ class _FamilySetupPageState extends State<FamilySetupPage> {
     );
   }
 }
+
+// -----------------------------------------------------------------------------
+// REUSABLE UI COMPONENTS
+// -----------------------------------------------------------------------------
 
 class StatusPill extends StatelessWidget {
   final String label;
@@ -997,27 +1494,17 @@ class InfoNote extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFF202B27),
         borderRadius: BorderRadius.circular(15),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.06),
-        ),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(
-            Icons.info_outline_rounded,
-            color: emerald,
-            size: 21,
-          ),
+          const Icon(Icons.info_outline_rounded, color: emerald, size: 21),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
               text,
-              style: const TextStyle(
-                color: muted,
-                fontSize: 12,
-                height: 1.55,
-              ),
+              style: const TextStyle(color: muted, fontSize: 12, height: 1.55),
             ),
           ),
         ],
@@ -1030,11 +1517,7 @@ class ProfileDetail extends StatelessWidget {
   final String label;
   final String value;
 
-  const ProfileDetail({
-    super.key,
-    required this.label,
-    required this.value,
-  });
+  const ProfileDetail({super.key, required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
@@ -1096,16 +1579,10 @@ class FeaturePlaceholder extends StatelessWidget {
           const SizedBox(height: 22),
           Text(
             title,
-            style: const TextStyle(
-              fontSize: 29,
-              fontWeight: FontWeight.bold,
-            ),
+            style: const TextStyle(fontSize: 29, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 10),
-          Text(
-            description,
-            style: const TextStyle(color: muted, height: 1.6),
-          ),
+          Text(description, style: const TextStyle(color: muted, height: 1.6)),
           const SizedBox(height: 25),
           const Text(
             'PLANNED SAFETY FEATURES',
@@ -1123,6 +1600,7 @@ class FeaturePlaceholder extends StatelessWidget {
               decoration: BoxDecoration(
                 color: surface,
                 borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: cardBorder),
               ),
               child: Row(
                 children: [
@@ -1133,22 +1611,17 @@ class FeaturePlaceholder extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: Text(
-                      item,
-                      style: const TextStyle(height: 1.4),
-                    ),
+                    child: Text(item, style: const TextStyle(height: 1.4)),
                   ),
                 ],
               ),
             ),
           const SizedBox(height: 12),
           const InfoNote(
-            text:
-                'These features are not active yet. We will implement and test them before describing them as working safety services.',
+            text: 'These features are not active yet. We will implement and test them before describing them as working safety services.',
           ),
         ],
       ),
     );
   }
 }
-

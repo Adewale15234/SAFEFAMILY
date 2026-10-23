@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "89374348217",
+    "project_id": "safefamily-app-aa07b",
+    "storage_bucket": "safefamily-app-aa07b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:89374348217:android:e17eea13d38537b625dc68",
+        "android_client_info": {
+          "package_name": "com.aderiktech.safefamily"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "89374348217-b74b8svo80m40u6jnmlpg6ljgquq2h13.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aderiktech.safefamily",
+            "certificate_hash": "8e5c8ee87c39373d75f3c3c5a394216b93ff3dc9"
+          }
+        },
+        {
+          "client_id": "89374348217-lk2fr9jm3ua5lec3orraqla4e2u4fri3.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAqkMDZjLLaAzx8G_NoD6qfxLkIuJMKRJQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "89374348217-lk2fr9jm3ua5lec3orraqla4e2u4fri3.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

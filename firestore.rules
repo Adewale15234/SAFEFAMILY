@@ -1,0 +1,372 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function familyPath(familyId) {
+      return /databases/$(database)/documents/families/$(familyId);
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function memberPath(familyId, uid) {
+      return /databases/$(database)/documents/families/$(familyId)/members/$(uid);
+    }
+
+    function invitationPath(familyId, invitationId) {
+      return /databases/$(database)/documents/families/$(familyId)/invitations/$(invitationId);
+    }
+
+    function isActiveMember(familyId) {
+      return signedIn()
+        && exists(memberPath(familyId, request.auth.uid))
+        && get(memberPath(familyId, request.auth.uid)).data.status == 'active';
+    }
+
+    function isOwner(familyId) {
+      return isActiveMember(familyId)
+        && get(familyPath(familyId)).data.ownerUid == request.auth.uid
+        && get(memberPath(familyId, request.auth.uid)).data.role == 'owner';
+    }
+
+    // Private account-to-family index. Creation must be atomic with membership.
+    match /users/{userUid} {
+      allow read: if signedIn() && userUid == request.auth.uid;
+
+      allow create: if signedIn()
+        && userUid == request.auth.uid
+        && request.resource.data.keys().hasAll([
+          'uid', 'familyId', 'role', 'status', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'uid', 'familyId', 'role', 'status', 'updatedAt'
+        ])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.familyId is string
+        && request.resource.data.familyId.size() > 0
+        && request.resource.data.role in ['owner', 'member']
+        && request.resource.data.status == 'active'
+        && request.resource.data.updatedAt == request.time
+        && getAfter(memberPath(
+          request.resource.data.familyId, request.auth.uid
+        )).data.uid == request.auth.uid
+        && getAfter(memberPath(
+          request.resource.data.familyId, request.auth.uid
+        )).data.status == 'active'
+        && getAfter(memberPath(
+          request.resource.data.familyId, request.auth.uid
+        )).data.role == request.resource.data.role
+        && (
+          (
+            request.resource.data.role == 'owner'
+            && getAfter(familyPath(
+              request.resource.data.familyId
+            )).data.ownerUid == request.auth.uid
+          )
+          ||
+          (
+            request.resource.data.role == 'member'
+            && getAfter(memberPath(
+              request.resource.data.familyId, request.auth.uid
+            )).data.invitationId is string
+            && getAfter(memberPath(
+              request.resource.data.familyId, request.auth.uid
+            )).data.invitationId.size() > 0
+          )
+        );
+
+      // No client-side reassignment or deletion of the account index.
+      allow update, delete: if false;
+    }
+
+    match /families/{familyId} {
+      // Family profile, owner membership, and account index are one operation.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'ownerUid', 'familyName', 'guardianName', 'phone',
+          'city', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'ownerUid', 'familyName', 'guardianName', 'phone',
+          'city', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.familyName is string
+        && request.resource.data.guardianName is string
+        && request.resource.data.phone is string
+        && request.resource.data.city is string
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && getAfter(memberPath(familyId, request.auth.uid)).data.uid == request.auth.uid
+        && getAfter(memberPath(familyId, request.auth.uid)).data.role == 'owner'
+        && getAfter(memberPath(familyId, request.auth.uid)).data.status == 'active'
+        && getAfter(userPath(request.auth.uid)).data.familyId == familyId
+        && getAfter(userPath(request.auth.uid)).data.role == 'owner'
+        && getAfter(userPath(request.auth.uid)).data.status == 'active';
+
+      allow read: if isActiveMember(familyId);
+
+      allow update: if isOwner(familyId)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['familyName', 'guardianName', 'phone', 'city', 'updatedAt'])
+        && request.resource.data.familyName is string
+        && request.resource.data.guardianName is string
+        && request.resource.data.phone is string
+        && request.resource.data.city is string
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+
+      match /members/{memberUid} {
+        allow read: if isActiveMember(familyId);
+
+        // Every account membership must be paired with its account index.
+        allow create: if signedIn()
+          && memberUid == request.auth.uid
+          && request.resource.data.keys().hasAll([
+            'uid', 'role', 'status', 'joinedAt',
+            'displayName', 'email', 'invitationId'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'uid', 'role', 'status', 'joinedAt',
+            'displayName', 'email', 'invitationId'
+          ])
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.status == 'active'
+          && request.resource.data.joinedAt == request.time
+          && getAfter(userPath(request.auth.uid)).data.uid == request.auth.uid
+          && getAfter(userPath(request.auth.uid)).data.familyId == familyId
+          && getAfter(userPath(request.auth.uid)).data.role == request.resource.data.role
+          && getAfter(userPath(request.auth.uid)).data.status == 'active'
+          && (
+            (
+              request.resource.data.role == 'owner'
+              && request.resource.data.invitationId == ''
+              && getAfter(familyPath(familyId)).data.ownerUid == request.auth.uid
+              && getAfter(familyPath(familyId)).data.createdAt == request.time
+            )
+            ||
+            (
+              request.resource.data.role == 'member'
+              && request.resource.data.invitationId is string
+              && request.resource.data.invitationId.size() > 0
+              && getAfter(invitationPath(
+                familyId, request.resource.data.invitationId
+              )).data.status == 'accepted'
+              && getAfter(invitationPath(
+                familyId, request.resource.data.invitationId
+              )).data.acceptedBy == request.auth.uid
+              && getAfter(invitationPath(
+                familyId, request.resource.data.invitationId
+              )).data.invitedEmail == request.auth.token.email
+              && getAfter(invitationPath(
+                familyId, request.resource.data.invitationId
+              )).data.role == 'member'
+            )
+          );
+
+        allow update, delete: if false;
+      }
+
+      // Each member controls only their own location document.
+      match /locations/{memberUid} {
+        function hasMatchingFamilyIndex() {
+          return signedIn()
+            && exists(userPath(request.auth.uid))
+            && get(userPath(request.auth.uid)).data.uid == request.auth.uid
+            && get(userPath(request.auth.uid)).data.familyId == familyId
+            && get(userPath(request.auth.uid)).data.status == 'active';
+        }
+
+        function validLocationDocument() {
+          return request.resource.data.keys().hasAll([
+              'uid', 'latitude', 'longitude', 'accuracy',
+              'updatedAt', 'sharingEnabled'
+            ])
+            && request.resource.data.keys().hasOnly([
+              'uid', 'latitude', 'longitude', 'accuracy',
+              'updatedAt', 'sharingEnabled'
+            ])
+            && request.resource.data.uid == request.auth.uid
+            && request.resource.data.latitude is number
+            && request.resource.data.latitude >= -90
+            && request.resource.data.latitude <= 90
+            && request.resource.data.longitude is number
+            && request.resource.data.longitude >= -180
+            && request.resource.data.longitude <= 180
+            && request.resource.data.accuracy is number
+            && request.resource.data.accuracy >= 0
+            && request.resource.data.updatedAt == request.time
+            && request.resource.data.sharingEnabled == true;
+        }
+
+        // Active family members can read locations within their family.
+        allow read: if isActiveMember(familyId)
+          && hasMatchingFamilyIndex();
+
+        // A signed-in member may publish only their own location.
+        allow create, update: if isActiveMember(familyId)
+          && memberUid == request.auth.uid
+          && hasMatchingFamilyIndex()
+          && validLocationDocument();
+
+        // Turning sharing off can remove the member's location document.
+        allow delete: if isActiveMember(familyId)
+          && memberUid == request.auth.uid
+          && hasMatchingFamilyIndex();
+      }
+      // Emergency alerts are private to active members of the same family.
+      match /emergencies/{emergencyId} {
+        function hasMatchingFamilyIndex() {
+          return signedIn()
+            && exists(userPath(request.auth.uid))
+            && get(userPath(request.auth.uid)).data.uid == request.auth.uid
+            && get(userPath(request.auth.uid)).data.familyId == familyId
+            && get(userPath(request.auth.uid)).data.status == 'active';
+        }
+
+        function validEmergencyDocument() {
+          return request.resource.data.keys().hasAll([
+              'createdBy', 'senderName', 'status', 'createdAt',
+              'latitude', 'longitude', 'accuracy',
+              'locationUpdatedAt', 'message'
+            ])
+            && request.resource.data.keys().hasOnly([
+              'createdBy', 'senderName', 'status', 'createdAt',
+              'latitude', 'longitude', 'accuracy',
+              'locationUpdatedAt', 'message'
+            ])
+            && request.resource.data.createdBy == request.auth.uid
+            && request.resource.data.senderName is string
+            && request.resource.data.senderName.size() > 0
+            && request.resource.data.senderName.size() <= 100
+            && request.resource.data.status == 'active'
+            && request.resource.data.createdAt == request.time
+            && request.resource.data.message is string
+            && request.resource.data.message.size() <= 500
+            && (
+              (
+                request.resource.data.latitude == null
+                && request.resource.data.longitude == null
+                && request.resource.data.accuracy == null
+                && request.resource.data.locationUpdatedAt == null
+              )
+              ||
+              (
+                request.resource.data.latitude is number
+                && request.resource.data.latitude >= -90
+                && request.resource.data.latitude <= 90
+                && request.resource.data.longitude is number
+                && request.resource.data.longitude >= -180
+                && request.resource.data.longitude <= 180
+                && request.resource.data.accuracy is number
+                && request.resource.data.accuracy >= 0
+                && request.resource.data.locationUpdatedAt is timestamp
+              )
+            );
+        }
+
+        allow read: if isActiveMember(familyId)
+          && hasMatchingFamilyIndex();
+
+        allow create: if isActiveMember(familyId)
+          && hasMatchingFamilyIndex()
+          && validEmergencyDocument();
+
+        // Alert updates and deletion are deliberately disabled in this phase.
+        allow update, delete: if false;
+      }
+      match /people/{personId} {
+        allow read: if isActiveMember(familyId);
+
+        allow create: if isOwner(familyId)
+          && request.resource.data.keys().hasAll([
+            'name', 'relationship', 'phone', 'age',
+            'createdBy', 'createdAt', 'updatedAt'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'name', 'relationship', 'phone', 'age',
+            'createdBy', 'createdAt', 'updatedAt'
+          ])
+          && request.resource.data.name is string
+          && request.resource.data.relationship is string
+          && request.resource.data.phone is string
+          && request.resource.data.age is int
+          && request.resource.data.age >= 0
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(familyId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly([
+              'name', 'relationship', 'phone', 'age', 'updatedAt'
+            ])
+          && request.resource.data.name is string
+          && request.resource.data.relationship is string
+          && request.resource.data.phone is string
+          && request.resource.data.age is int
+          && request.resource.data.age >= 0
+          && request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(familyId);
+      }
+
+      match /invitations/{invitationId} {
+        allow read: if isOwner(familyId)
+          || (
+            signedIn()
+            && resource.data.status == 'pending'
+            && resource.data.invitedEmail == request.auth.token.email
+          );
+
+        allow create: if isOwner(familyId)
+          && request.resource.data.keys().hasAll([
+            'invitedEmail', 'invitedBy', 'status', 'role',
+            'createdAt', 'expiresAt', 'acceptedBy', 'acceptedAt'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'invitedEmail', 'invitedBy', 'status', 'role',
+            'createdAt', 'expiresAt', 'acceptedBy', 'acceptedAt'
+          ])
+          && request.resource.data.invitedEmail is string
+          && request.resource.data.invitedEmail.size() > 0
+          && request.resource.data.invitedBy == request.auth.uid
+          && request.resource.data.status == 'pending'
+          && request.resource.data.role == 'member'
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.expiresAt is timestamp
+          && request.resource.data.expiresAt > request.time
+          && request.resource.data.acceptedBy == ''
+          && request.resource.data.acceptedAt == null;
+
+        allow update: if signedIn()
+          && resource.data.status == 'pending'
+          && resource.data.invitedEmail == request.auth.token.email
+          && resource.data.expiresAt > request.time
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'acceptedBy', 'acceptedAt'])
+          && request.resource.data.status == 'accepted'
+          && request.resource.data.acceptedBy == request.auth.uid
+          && request.resource.data.acceptedAt == request.time
+          && getAfter(memberPath(familyId, request.auth.uid)).data.invitationId
+            == invitationId;
+
+        allow delete: if isOwner(familyId)
+          && resource.data.status == 'pending';
+      }
+    }
+
+    // Chat, location sharing, and all unreviewed collections remain denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
