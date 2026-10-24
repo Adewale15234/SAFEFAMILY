@@ -1,9 +1,18 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+
+import 'location_sharing_service.dart';
+
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 class LocationMapPage extends StatefulWidget {
-  const LocationMapPage({super.key});
+  const LocationMapPage({super.key, this.familyId});
+
+  final String? familyId;
 
   @override
   State<LocationMapPage> createState() => _LocationMapPageState();
@@ -30,20 +39,319 @@ class _LocationMapPageState extends State<LocationMapPage> {
   String? _message;
   String _status = 'Location not checked';
 
-  Set<Marker> get _markers {
-    final position = _position;
-    if (position == null) return {};
+  final LocationSharingService _sharingService = LocationSharingService();
+  StreamSubscription<Position>? _positionSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _locationsSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _membersSubscription;
 
-    return {
-      Marker(
-        markerId: const MarkerId('this_phone'),
-        position: LatLng(position.latitude, position.longitude),
-        infoWindow: InfoWindow(
-          title: 'This phone',
-          snippet: 'Accuracy: ${position.accuracy.toStringAsFixed(0)} m',
+  final Map<String, Map<String, dynamic>> _familyLocations = {};
+  final Map<String, Map<String, dynamic>> _familyMembers = {};
+
+  bool _sharingEnabled = false;
+  bool _publishing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _watchFamilyData();
+  }
+
+  @override
+  void didUpdateWidget(covariant LocationMapPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.familyId != widget.familyId) {
+      _watchFamilyData();
+    }
+  }
+
+  void _watchFamilyData() {
+    _locationsSubscription?.cancel();
+    _membersSubscription?.cancel();
+    _familyLocations.clear();
+    _familyMembers.clear();
+
+    final familyId = widget.familyId;
+    if (familyId == null || familyId.isEmpty) {
+      if (mounted) setState(() {});
+      return;
+    }
+
+    _locationsSubscription = _sharingService
+        .watchFamilyLocations(familyId)
+        .listen(
+          (snapshot) {
+            if (!mounted) return;
+            setState(() {
+              _familyLocations
+                ..clear()
+                ..addEntries(
+                  snapshot.docs.map((doc) => MapEntry(doc.id, doc.data())),
+                );
+            });
+          },
+          onError: (Object error) {
+            if (!mounted) return;
+            setState(() {
+              _message = 'Could not load family locations. Check your connection and family access.';
+            });
+          },
+        );
+
+    _membersSubscription = _sharingService
+        .watchFamilyMembers(familyId)
+        .listen(
+          (snapshot) {
+            if (!mounted) return;
+            setState(() {
+              _familyMembers
+                ..clear()
+                ..addEntries(
+                  snapshot.docs.map((doc) => MapEntry(doc.id, doc.data())),
+                );
+            });
+          },
+          onError: (Object error) {
+            if (!mounted) return;
+            setState(() {
+              _message = 'Could not load family member details. Check your connection and family access.';
+            });
+          },
+        );
+  }
+
+  Future<void> _publishPosition(Position position) async {
+    final familyId = widget.familyId;
+    if (!_sharingEnabled || familyId == null || _publishing) return;
+
+    _publishing = true;
+    try {
+      await _sharingService.publishPosition(
+        familyId: familyId,
+        position: position,
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _message = 'Location sharing could not sync. Check your connection and family membership.';
+        });
+      }
+    } finally {
+      _publishing = false;
+    }
+  }
+
+  Future<void> _startSharing() async {
+    if (_sharingEnabled || _loading) return;
+
+    if (widget.familyId == null || widget.familyId!.isEmpty) {
+      setState(() {
+        _message =
+            'Create or join a cloud family before sharing your location.';
+      });
+      return;
+    }
+
+    // Recheck permission and obtain a genuinely fresh position first.
+    await _locatePhone();
+
+    if (!mounted ||
+        _status != 'Location updated successfully' ||
+        _position == null) {
+      return;
+    }
+
+    setState(() {
+      _sharingEnabled = true;
+      _status = 'Location sharing is on';
+      _message = null;
+    });
+
+    await _publishPosition(_position!);
+
+    try {
+      _positionSubscription =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 20,
+            ),
+          ).listen(
+            (position) {
+              if (!mounted || !_sharingEnabled) return;
+
+              setState(() {
+                _position = position;
+                _status = 'Sharing location updates';
+                _message = null;
+              });
+
+              _publishPosition(position);
+            },
+            onError: (Object error) {
+              if (!mounted) return;
+              setState(() {
+                _status = 'Waiting for GPS';
+                _message = 'No fresh GPS updates are available. The family may only see the last recorded location. Check Location settings and permission.';
+              });
+            },
+          );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _status = 'Could not start location updates';
+        _message = 'Check Location settings and permission, then try again.';
+      });
+    }
+  }
+
+  Future<void> _stopSharing() async {
+    final familyId = widget.familyId;
+
+    setState(() {
+      _sharingEnabled = false;
+      _status = 'Location sharing is off';
+    });
+
+    await _positionSubscription?.cancel();
+    _positionSubscription = null;
+
+    if (familyId == null || familyId.isEmpty) return;
+
+    try {
+      await _sharingService.stopSharing(familyId: familyId);
+      if (mounted) {
+        setState(() {
+          _message = 'Sharing is off. Your published location has been removed from the family map.';
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _message = 'GPS updates have stopped, but the published location could not be removed. Reconnect and try again.';
+        });
+      }
+    }
+  }
+
+  Widget _sharingToggle() {
+    final hasFamily = widget.familyId != null && widget.familyId!.isNotEmpty;
+
+    return Row(
+      children: [
+        Icon(
+          _sharingEnabled
+              ? Icons.location_on_rounded
+              : Icons.location_off_rounded,
+          color: _sharingEnabled ? _green : _muted,
+          size: 22,
         ),
-      ),
-    };
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Share my location',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                !hasFamily
+                    ? 'Join a cloud family first'
+                    : _sharingEnabled
+                    ? 'Your family can see your published location'
+                    : 'Off until you choose to share',
+                style: const TextStyle(color: _muted, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+        Switch(
+          value: _sharingEnabled,
+          activeTrackColor: _green,
+          onChanged: !hasFamily
+              ? null
+              : (enabled) {
+                  if (enabled) {
+                    _startSharing();
+                  } else {
+                    _stopSharing();
+                  }
+                },
+        ),
+      ],
+    );
+  }
+
+  Set<Marker> get _markers {
+    final markers = <Marker>{};
+    final position = _position;
+
+    if (position != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('this_phone'),
+          position: LatLng(position.latitude, position.longitude),
+          infoWindow: InfoWindow(
+            title: 'This phone',
+            snippet: 'Last GPS reading: ${_formatTime(position.timestamp)}',
+          ),
+        ),
+      );
+    }
+
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+
+    for (final entry in _familyLocations.entries) {
+      final uid = entry.key;
+      final data = entry.value;
+
+      if (uid == currentUid) continue;
+
+      final latitude = data['latitude'];
+      final longitude = data['longitude'];
+      if (latitude is! num || longitude is! num) continue;
+
+      final member = _familyMembers[uid] ?? {};
+      final displayName = member['displayName'];
+      final email = member['email'];
+      final name = displayName is String && displayName.trim().isNotEmpty
+          ? displayName
+          : email is String && email.trim().isNotEmpty
+          ? email
+          : 'Family member';
+
+      final rawUpdatedAt = data['updatedAt'];
+      final updatedAt = rawUpdatedAt is Timestamp
+          ? rawUpdatedAt.toDate()
+          : null;
+
+      final age = updatedAt == null
+          ? null
+          : DateTime.now().difference(updatedAt.toLocal());
+
+      final stale = age == null || age > const Duration(minutes: 5);
+
+      markers.add(
+        Marker(
+          markerId: MarkerId('family_$uid'),
+          position: LatLng(latitude.toDouble(), longitude.toDouble()),
+          infoWindow: InfoWindow(
+            title: name,
+            snippet: stale
+                ? 'Last known location · ${_formatTime(updatedAt)}'
+                : 'Updated ${_formatTime(updatedAt)}',
+          ),
+        ),
+      );
+    }
+
+    return markers;
   }
 
   Future<void> _locatePhone() async {
@@ -101,7 +409,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
       _permissionGranted = true;
 
       if (!mounted) return;
-      setState(() => _status = 'Getting this phoneâ€™s location...');
+      setState(() => _status = 'Getting this phoneÃ¢â‚¬â„¢s location...');
 
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
@@ -158,7 +466,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
     final minute = local.minute.toString().padLeft(2, '0');
     final period = local.hour >= 12 ? 'PM' : 'AM';
 
-    return '${local.day}/${local.month}/${local.year} Â· '
+    return '${local.day}/${local.month}/${local.year} Ã‚Â· '
         '$hour:$minute $period';
   }
 
@@ -272,6 +580,8 @@ class _LocationMapPageState extends State<LocationMapPage> {
                 const Icon(Icons.shield_outlined, color: _green, size: 23),
             ],
           ),
+          const SizedBox(height: 14),
+          _sharingToggle(),
           if (position != null) ...[
             const SizedBox(height: 15),
             const Divider(color: _border, height: 1),
@@ -299,7 +609,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
                 const SizedBox(width: 7),
                 Expanded(
                   child: Text(
-                    'Accuracy Â±${position.accuracy.toStringAsFixed(0)} m',
+                    'Accuracy Ã‚Â±${position.accuracy.toStringAsFixed(0)} m',
                     style: const TextStyle(color: _muted, fontSize: 12),
                   ),
                 ),
@@ -380,6 +690,9 @@ class _LocationMapPageState extends State<LocationMapPage> {
 
   @override
   void dispose() {
+    _positionSubscription?.cancel();
+    _locationsSubscription?.cancel();
+    _membersSubscription?.cancel();
     _mapController?.dispose();
     super.dispose();
   }
@@ -528,10 +841,15 @@ class _LocationMapPageState extends State<LocationMapPage> {
               const SizedBox(height: 12),
               _locationStatusCard(),
               const SizedBox(height: 10),
-              const Text(
-                'Only this phone is located in this first version. '
-                'Family sharing is not active yet.',
-                style: TextStyle(color: _muted, fontSize: 11, height: 1.4),
+              Text(
+                widget.familyId == null
+                    ? 'Join a cloud family to view and share family locations.'
+                    : 'Family markers show the latest published location. A timestamp does not guarantee the phone is still there.',
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 11,
+                  height: 1.4,
+                ),
               ),
             ],
           ),

@@ -364,9 +364,39 @@ service cloud.firestore {
       }
     }
 
-    // Chat, location sharing, and all unreviewed collections remain denied.
+    // Family chat: active members only; message updates/deletes are not allowed.
+match /families/{familyId}/chatMessages/{messageId} {
+  allow read: if isActiveMember(familyId);
+
+  allow create: if isActiveMember(familyId)
+    && request.resource.data.keys().hasOnly([
+      'senderId', 'senderName', 'text', 'type',
+      'createdAt', 'replyToText', 'replyToSender'
+    ])
+    && request.resource.data.keys().hasAll([
+      'senderId', 'senderName', 'text', 'type',
+      'createdAt', 'replyToText', 'replyToSender'
+    ])
+    && request.resource.data.senderId == request.auth.uid
+    && request.resource.data.senderName is string
+    && request.resource.data.senderName.size() > 0
+    && request.resource.data.senderName.size() <= 80
+    && request.resource.data.text is string
+    && request.resource.data.text.size() > 0
+    && request.resource.data.text.size() <= 4000
+    && request.resource.data.type in ['text', 'safety']
+    && request.resource.data.createdAt == request.time
+    && request.resource.data.replyToText is string
+    && request.resource.data.replyToText.size() <= 4000
+    && request.resource.data.replyToSender is string
+    && request.resource.data.replyToSender.size() <= 80;
+
+  allow update, delete: if false;
+}
+// Chat, location sharing, and all unreviewed collections remain denied.
     match /{document=**} {
       allow read, write: if false;
     }
   }
 }
+
