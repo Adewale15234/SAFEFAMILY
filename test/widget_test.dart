@@ -21,7 +21,8 @@ void main() {
 
     expect(find.byType(AuthenticationPage), findsOneWidget);
     expect(find.text('SAFEFAMILY'), findsOneWidget);
-    expect(find.text('Continue with Google'), findsOneWidget);
+    expect(find.text('Sign In'), findsOneWidget);
+    expect(find.text('Sign Up'), findsOneWidget);
 
     // The old email/password registration form must not return.
     expect(find.text('Create your account'), findsNothing);

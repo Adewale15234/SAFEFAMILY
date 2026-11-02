@@ -67,7 +67,9 @@ class _AuthenticationPageState extends State<AuthenticationPage> {
   bool _busy = false;
 
   static final Future<void> _googleSignInInitialization = GoogleSignIn.instance
-      .initialize();
+      .initialize(
+        serverClientId: '89374348217-lk2fr9jm3ua5lec3orraqla4e2u4fri3.apps.googleusercontent.com',
+      );
 
   Future<void> _signInWithGoogle() async {
     if (_busy) return;
@@ -208,11 +210,9 @@ class _AuthenticationPageState extends State<AuthenticationPage> {
                                 color: _emerald,
                               ),
                             )
-                          : const Icon(Icons.g_mobiledata_rounded, size: 32),
+                          : const Icon(Icons.login_rounded),
                       label: Text(
-                        _busy
-                            ? 'Connecting to Google...'
-                            : 'Continue with Google',
+                        _busy ? 'Connecting to Google...' : 'Sign In',
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
@@ -221,6 +221,28 @@ class _AuthenticationPageState extends State<AuthenticationPage> {
                       style: OutlinedButton.styleFrom(
                         foregroundColor: Colors.white,
                         side: const BorderSide(color: Color(0xFF293831)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: 54,
+                    child: FilledButton.icon(
+                      onPressed: _busy ? null : _signInWithGoogle,
+                      icon: const Icon(Icons.person_add_alt_1_rounded),
+                      label: const Text(
+                        'Sign Up',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: _emerald,
+                        foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14),
                         ),

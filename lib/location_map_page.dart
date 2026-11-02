@@ -55,13 +55,21 @@ class _LocationMapPageState extends State<LocationMapPage> {
   void initState() {
     super.initState();
     _watchFamilyData();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _startSharing();
+    });
   }
 
   @override
   void didUpdateWidget(covariant LocationMapPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.familyId != widget.familyId) {
+      _positionSubscription?.cancel();
+      _sharingEnabled = false;
       _watchFamilyData();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startSharing();
+      });
     }
   }
 
@@ -144,20 +152,21 @@ class _LocationMapPageState extends State<LocationMapPage> {
   Future<void> _startSharing() async {
     if (_sharingEnabled || _loading) return;
 
-    if (widget.familyId == null || widget.familyId!.isEmpty) {
-      setState(() {
-        _message =
-            'Create or join a cloud family before sharing your location.';
-      });
-      return;
-    }
-
-    // Recheck permission and obtain a genuinely fresh position first.
+    // Request location permission automatically during app startup.
+    // Android still requires the user to approve its permission prompt.
     await _locatePhone();
 
     if (!mounted ||
         _status != 'Location updated successfully' ||
         _position == null) {
+      return;
+    }
+
+    // A cloud family is required before publishing location to family members.
+    if (widget.familyId == null || widget.familyId!.isEmpty) {
+      setState(() {
+        _message = 'Location permission is ready. Create or join a cloud family to share location.';
+      });
       return;
     }
 
@@ -172,9 +181,16 @@ class _LocationMapPageState extends State<LocationMapPage> {
     try {
       _positionSubscription =
           Geolocator.getPositionStream(
-            locationSettings: const LocationSettings(
+            locationSettings: AndroidSettings(
               accuracy: LocationAccuracy.high,
-              distanceFilter: 20,
+              distanceFilter: 10,
+              intervalDuration: const Duration(seconds: 5),
+              foregroundNotificationConfig: const ForegroundNotificationConfig(
+                notificationTitle: 'SAFEFAMILY location sharing',
+                notificationText: 'Location sharing is active for your family.',
+                notificationChannelName: 'SAFEFAMILY location sharing',
+                enableWakeLock: true,
+              ),
             ),
           ).listen(
             (position) {
@@ -234,57 +250,61 @@ class _LocationMapPageState extends State<LocationMapPage> {
     }
   }
 
-  Widget _sharingToggle() {
+  Widget _sharingStatus() {
     final hasFamily = widget.familyId != null && widget.familyId!.isNotEmpty;
+    final title = !hasFamily
+        ? 'Join a cloud family to enable location sharing'
+        : _sharingEnabled
+        ? (_message == null
+              ? 'Sharing location with your family'
+              : 'Location sharing needs attention')
+        : _loading
+        ? 'Starting location sharing...'
+        : 'Waiting for location permission';
 
-    return Row(
-      children: [
-        Icon(
-          _sharingEnabled
-              ? Icons.location_on_rounded
-              : Icons.location_off_rounded,
-          color: _sharingEnabled ? _green : _muted,
-          size: 22,
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Share my location',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                !hasFamily
-                    ? 'Join a cloud family first'
-                    : _sharingEnabled
-                    ? 'Your family can see your published location'
-                    : 'Off until you choose to share',
-                style: const TextStyle(color: _muted, fontSize: 11),
-              ),
-            ],
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      decoration: BoxDecoration(
+        color: _green.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _border),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            _sharingEnabled
+                ? Icons.location_on_rounded
+                : Icons.location_searching_rounded,
+            color: _green,
+            size: 20,
           ),
-        ),
-        Switch(
-          value: _sharingEnabled,
-          activeTrackColor: _green,
-          onChanged: !hasFamily
-              ? null
-              : (enabled) {
-                  if (enabled) {
-                    _startSharing();
-                  } else {
-                    _stopSharing();
-                  }
-                },
-        ),
-      ],
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          if (_loading)
+            const SizedBox(
+              width: 17,
+              height: 17,
+              child: CircularProgressIndicator(strokeWidth: 2, color: _green),
+            ),
+          if (_sharingEnabled)
+            IconButton(
+              tooltip: 'Stop location sharing',
+              onPressed: _loading ? null : _stopSharing,
+              icon: const Icon(Icons.stop_circle_outlined),
+              color: Colors.redAccent,
+              visualDensity: VisualDensity.compact,
+            ),
+        ],
+      ),
     );
   }
 
@@ -344,7 +364,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
           infoWindow: InfoWindow(
             title: name,
             snippet: stale
-                ? 'Last known location · ${_formatTime(updatedAt)}'
+                ? 'Last known location - ${_formatTime(updatedAt)}'
                 : 'Updated ${_formatTime(updatedAt)}',
           ),
         ),
@@ -409,7 +429,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
       _permissionGranted = true;
 
       if (!mounted) return;
-      setState(() => _status = 'Getting this phoneÃ¢â‚¬â„¢s location...');
+      setState(() => _status = "Getting this phone's location...");
 
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
@@ -466,7 +486,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
     final minute = local.minute.toString().padLeft(2, '0');
     final period = local.hour >= 12 ? 'PM' : 'AM';
 
-    return '${local.day}/${local.month}/${local.year} Ã‚Â· '
+    return '${local.day}/${local.month}/${local.year} - '
         '$hour:$minute $period';
   }
 
@@ -581,7 +601,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
             ],
           ),
           const SizedBox(height: 14),
-          _sharingToggle(),
+          _sharingStatus(),
           if (position != null) ...[
             const SizedBox(height: 15),
             const Divider(color: _border, height: 1),
@@ -609,7 +629,7 @@ class _LocationMapPageState extends State<LocationMapPage> {
                 const SizedBox(width: 7),
                 Expanded(
                   child: Text(
-                    'Accuracy Ã‚Â±${position.accuracy.toStringAsFixed(0)} m',
+                    'Accuracy +/-${position.accuracy.toStringAsFixed(0)} m',
                     style: const TextStyle(color: _muted, fontSize: 12),
                   ),
                 ),

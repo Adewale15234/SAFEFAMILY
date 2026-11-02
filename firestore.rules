@@ -1,34 +1,26 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
-
     function signedIn() {
       return request.auth != null;
     }
-
     function familyPath(familyId) {
       return /databases/$(database)/documents/families/$(familyId);
     }
-
     function userPath(uid) {
       return /databases/$(database)/documents/users/$(uid);
     }
-
     function memberPath(familyId, uid) {
       return /databases/$(database)/documents/families/$(familyId)/members/$(uid);
     }
-
     function invitationPath(familyId, invitationId) {
       return /databases/$(database)/documents/families/$(familyId)/invitations/$(invitationId);
     }
-
     function isActiveMember(familyId) {
       return signedIn()
         && exists(memberPath(familyId, request.auth.uid))
         && get(memberPath(familyId, request.auth.uid)).data.status == 'active';
     }
-
     function isOwner(familyId) {
       return isActiveMember(familyId)
         && get(familyPath(familyId)).data.ownerUid == request.auth.uid
@@ -80,6 +72,37 @@ service cloud.firestore {
             )).data.invitationId.size() > 0
           )
         );
+
+      // Each signed-in account can manage only its own notification FIDs.
+      match /devices/{deviceId} {
+        allow read: if signedIn() && userUid == request.auth.uid;
+
+        allow create, update: if signedIn()
+          && userUid == request.auth.uid
+          && request.resource.data.keys().hasAll([
+            'fid', 'platform', 'updatedAt'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'fid', 'platform', 'updatedAt', 'fcmToken'
+          ])
+          && request.resource.data.fid is string
+          && request.resource.data.fid.size() > 0
+          && request.resource.data.fid.size() <= 256
+          && request.resource.data.platform is string
+          && request.resource.data.platform.size() > 0
+          && request.resource.data.platform.size() <= 32
+          && request.resource.data.updatedAt == request.time
+          && (
+            !('fcmToken' in request.resource.data.keys())
+            || (
+              request.resource.data.fcmToken is string
+              && request.resource.data.fcmToken.size() > 0
+              && request.resource.data.fcmToken.size() <= 4096
+            )
+          );
+
+        allow delete: if signedIn() && userUid == request.auth.uid;
+      }
 
       // No client-side reassignment or deletion of the account index.
       allow update, delete: if false;
@@ -222,6 +245,7 @@ service cloud.firestore {
           && memberUid == request.auth.uid
           && hasMatchingFamilyIndex();
       }
+
       // Emergency alerts are private to active members of the same family.
       match /emergencies/{emergencyId} {
         function hasMatchingFamilyIndex() {
@@ -283,6 +307,7 @@ service cloud.firestore {
         // Alert updates and deletion are deliberately disabled in this phase.
         allow update, delete: if false;
       }
+
       match /people/{personId} {
         allow read: if isActiveMember(familyId);
 
@@ -365,38 +390,38 @@ service cloud.firestore {
     }
 
     // Family chat: active members only; message updates/deletes are not allowed.
-match /families/{familyId}/chatMessages/{messageId} {
-  allow read: if isActiveMember(familyId);
+    match /families/{familyId}/chatMessages/{messageId} {
+      allow read: if isActiveMember(familyId);
 
-  allow create: if isActiveMember(familyId)
-    && request.resource.data.keys().hasOnly([
-      'senderId', 'senderName', 'text', 'type',
-      'createdAt', 'replyToText', 'replyToSender'
-    ])
-    && request.resource.data.keys().hasAll([
-      'senderId', 'senderName', 'text', 'type',
-      'createdAt', 'replyToText', 'replyToSender'
-    ])
-    && request.resource.data.senderId == request.auth.uid
-    && request.resource.data.senderName is string
-    && request.resource.data.senderName.size() > 0
-    && request.resource.data.senderName.size() <= 80
-    && request.resource.data.text is string
-    && request.resource.data.text.size() > 0
-    && request.resource.data.text.size() <= 4000
-    && request.resource.data.type in ['text', 'safety']
-    && request.resource.data.createdAt == request.time
-    && request.resource.data.replyToText is string
-    && request.resource.data.replyToText.size() <= 4000
-    && request.resource.data.replyToSender is string
-    && request.resource.data.replyToSender.size() <= 80;
+      allow create: if isActiveMember(familyId)
+        && request.resource.data.keys().hasOnly([
+          'senderId', 'senderName', 'text', 'type',
+          'createdAt', 'replyToText', 'replyToSender'
+        ])
+        && request.resource.data.keys().hasAll([
+          'senderId', 'senderName', 'text', 'type',
+          'createdAt', 'replyToText', 'replyToSender'
+        ])
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.senderName is string
+        && request.resource.data.senderName.size() > 0
+        && request.resource.data.senderName.size() <= 80
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 4000
+        && request.resource.data.type in ['text', 'safety']
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.replyToText is string
+        && request.resource.data.replyToText.size() <= 4000
+        && request.resource.data.replyToSender is string
+        && request.resource.data.replyToSender.size() <= 80;
 
-  allow update, delete: if false;
-}
-// Chat, location sharing, and all unreviewed collections remain denied.
+      allow update, delete: if false;
+    }
+
+    // Chat, location sharing, and all unreviewed collections remain denied.
     match /{document=**} {
       allow read, write: if false;
     }
   }
 }
-

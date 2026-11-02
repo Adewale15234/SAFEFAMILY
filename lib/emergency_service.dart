@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
 
 enum SosDeliveryStatus { delivered, queued }
 
@@ -54,11 +55,65 @@ class _PendingSos {
 }
 
 class EmergencyService {
+  static const String _sosWorkerUrl =
+      'https://safefamily-sos.wismailadewale.workers.dev/send-sos';
+
+  /// Requests push notifications after the SOS is saved in Firestore.
+  /// Notification failure must never undo or invalidate the saved SOS.
+  Future<void> _notifySosWorker({
+    required String familyId,
+    required String alertId,
+    required String expectedSenderUid,
+  }) async {
+    try {
+      final user = _auth.currentUser;
+
+      if (user == null || user.uid != expectedSenderUid) {
+        debugPrint(
+          'SOS notification skipped: original account is not signed in.',
+        );
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+
+      if (idToken == null || idToken.isEmpty) {
+        debugPrint('SOS notification skipped: Firebase ID token unavailable.');
+        return;
+      }
+
+      final response = await http
+          .post(
+            Uri.parse(_sosWorkerUrl),
+            headers: {
+              'Authorization': 'Bearer $idToken',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'familyId': familyId, 'alertId': alertId}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        debugPrint(
+          'SOS notification request failed: HTTP ${response.statusCode}.',
+        );
+        return;
+      }
+
+      debugPrint('SOS notification request completed: ${response.body}');
+    } catch (error) {
+      debugPrint('SOS notification request failed: $error');
+    }
+  }
+
   EmergencyService({FirebaseFirestore? firestore, FirebaseAuth? auth})
     : _firestore = firestore ?? FirebaseFirestore.instance,
       _auth = auth ?? FirebaseAuth.instance;
 
   static const String _queueKey = 'safefamily_pending_sos_v1';
+
+  static const String _testSosMessage =
+      'TEST ALERT — not a real emergency. SAFEFAMILY notification test.';
 
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
@@ -136,11 +191,12 @@ class EmergencyService {
       throw StateError('Join or create a family before sending an SOS.');
     }
 
-    final safeName = senderName.trim().isEmpty
+    final trimmedName = senderName.trim();
+    final safeName = trimmedName.isEmpty
         ? 'Family member'
-        : senderName.trim().substring(
+        : trimmedName.substring(
             0,
-            senderName.trim().length > 100 ? 100 : senderName.trim().length,
+            trimmedName.length > 100 ? 100 : trimmedName.length,
           );
 
     final safeMessage = message.length > 500
@@ -192,6 +248,62 @@ class EmergencyService {
     }
   }
 
+  /// Creates a test SOS directly in Firestore.
+  ///
+  /// This deliberately bypasses the real SOS offline queue and does not
+  /// attach a location. The record is permanent under the current rules,
+  /// which prohibit updating or deleting emergency records.
+  Future<String> submitTestSosAlert({
+    required String familyId,
+    required String senderName,
+  }) async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      throw StateError('Sign in before testing SOS notifications.');
+    }
+
+    final cleanedFamilyId = familyId.trim();
+
+    if (cleanedFamilyId.isEmpty) {
+      throw StateError('Join or create a family before testing SOS.');
+    }
+
+    final trimmedName = senderName.trim();
+    final safeName = trimmedName.isEmpty
+        ? 'Family member'
+        : trimmedName.substring(
+            0,
+            trimmedName.length > 100 ? 100 : trimmedName.length,
+          );
+
+    final reference = _firestore
+        .collection('families')
+        .doc(cleanedFamilyId)
+        .collection('emergencies')
+        .doc();
+
+    await reference.set({
+      'createdBy': user.uid,
+      'senderName': safeName,
+      'status': 'active',
+      'createdAt': FieldValue.serverTimestamp(),
+      'latitude': null,
+      'longitude': null,
+      'accuracy': null,
+      'locationUpdatedAt': null,
+      'message': _testSosMessage,
+    });
+
+    await _notifySosWorker(
+      familyId: cleanedFamilyId,
+      alertId: reference.id,
+      expectedSenderUid: user.uid,
+    );
+
+    return reference.id;
+  }
+
   Future<void> _uploadPending(_PendingSos pending) async {
     final currentUser = _auth.currentUser;
 
@@ -219,6 +331,12 @@ class EmergencyService {
       if (data?['createdBy'] != pending.uid) {
         throw StateError('The SOS document ID belongs to a different account.');
       }
+
+      await _notifySosWorker(
+        familyId: pending.familyId,
+        alertId: pending.alertId,
+        expectedSenderUid: pending.uid,
+      );
 
       return;
     }
@@ -278,8 +396,14 @@ class EmergencyService {
         })
         .timeout(const Duration(seconds: 10));
 
-    // The server will confirm existence on the next retry if the write
-    // was accepted but its acknowledgement was delayed.
+    await _notifySosWorker(
+      familyId: pending.familyId,
+      alertId: pending.alertId,
+      expectedSenderUid: pending.uid,
+    );
+
+    // If the upload acknowledgement was delayed, the next retry checks
+    // the server and requests notification delivery again.
   }
 
   /// Retries alerts belonging to the currently signed-in user and

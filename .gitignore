@@ -86,3 +86,13 @@ app.*.map.json
 /firebase-debug.log
 /firestore-debug.log
 /ui-debug.log
+
+# Additional SAFEFAMILY upload protection
+node_modules/
+**/node_modules/
+firebase-functions-debug.txt
+github-artifact/
+*.before_*
+*.bak
+*.bak-*
+*.backup-*
